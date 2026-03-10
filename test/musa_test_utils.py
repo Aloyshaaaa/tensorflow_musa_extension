@@ -17,17 +17,8 @@
 
 import logging
 import os
-<<<<<<< HEAD
-import warnings
-
-# Suppress TensorFlow tf.function retracing warnings that occur in control flow tests.
-# These warnings are expected when @tf.function is called with different Python arguments
-# in loops, and don't affect test correctness.
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
-=======
 import unittest
 import tensorflow as tf
->>>>>>> 52a33ee (fix the problem that cant detect the musa device and implement an new op)
 
 
 def load_musa_plugin():
