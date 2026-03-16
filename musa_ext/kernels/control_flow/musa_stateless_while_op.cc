@@ -38,7 +38,7 @@ namespace musa {
 // - Input: list of tensors
 // - Cond: function that takes same inputs and returns scalar boolean
 // - Body: function that takes same inputs and returns same number of tensors
-// - Output: final loop variables after cond returns false231
+// - Output: final loop variables after cond returns false231111
 
 class MusaStatelessWhileOp : public OpKernel {
  public:
