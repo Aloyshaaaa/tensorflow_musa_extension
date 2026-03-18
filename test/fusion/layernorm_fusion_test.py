@@ -94,11 +94,14 @@ class LayerNormFusionE2ETest(MUSATestCase):
         right_np,
         scale_np,
         enable_kernel,
+        use_clip_op=False,
         dump_graph=False,
         warmup_iters=0,
         measure_iters=0,
     ):
-        graph, left, right, scale, output = self._build_graph()
+        graph, left, right, scale, output = self._build_graph(
+            use_clip_op=use_clip_op
+        )
         config = create_config_with_musa_optimizer()
         feed_dict = {left: left_np, right: right_np, scale: scale_np}
 
@@ -151,7 +154,7 @@ class LayerNormFusionE2ETest(MUSATestCase):
 
         return result, dump_text, graph_def, avg_latency_ms
 
-    def _build_graph(self):
+    def _build_graph(self, use_clip_op=False):
         graph = tf.Graph()
         with graph.as_default():
             with tf.device("/device:MUSA:0"):
@@ -198,18 +201,25 @@ class LayerNormFusionE2ETest(MUSATestCase):
                 )
 
                 std = tf.sqrt(var_expand, name="std")
-                std_min = tf.minimum(
-                    std,
-                    tf.constant(_CLIP_UPPER, dtype=tf.float32, name="clip_upper"),
-                    name="std_min",
+                clip_upper = tf.constant(
+                    _CLIP_UPPER, dtype=tf.float32, name="clip_upper"
                 )
-                std_max = tf.maximum(
-                    std_min,
-                    tf.constant(_CLIP_LOWER, dtype=tf.float32, name="clip_lower"),
-                    name="std_max",
+                clip_lower = tf.constant(
+                    _CLIP_LOWER, dtype=tf.float32, name="clip_lower"
                 )
+                if use_clip_op:
+                    clipped_std = tf.raw_ops.ClipByValue(
+                        t=std,
+                        clip_value_min=clip_lower,
+                        clip_value_max=clip_upper,
+                        name="std_clip",
+                    )
+                else:
+                    std_min = tf.minimum(std, clip_upper, name="std_min")
+                    clipped_std = tf.maximum(std_min, clip_lower, name="std_max")
+
                 normalized = tf.raw_ops.RealDiv(
-                    x=sub_a, y=std_max, name="normalized"
+                    x=sub_a, y=clipped_std, name="normalized"
                 )
 
                 scale_expand_dim = tf.constant(
@@ -227,7 +237,7 @@ class LayerNormFusionE2ETest(MUSATestCase):
 
         return graph, left, right, scale, output
 
-    def test_layernorm_core_fusion(self):
+    def test_layernorm_core_fusion_via_clip_pattern(self):
         rng = np.random.RandomState(42)
         batch_size = 8
 
@@ -269,36 +279,60 @@ class LayerNormFusionE2ETest(MUSATestCase):
 
         self.assertAllClose(result, expected, rtol=1e-5, atol=1e-5)
 
-    def test_layernorm_core_kernel_gate(self):
-        rng = np.random.RandomState(123)
+    def test_layernorm_core_fusion_via_direct_clip_op(self):
+        if not hasattr(tf.raw_ops, "ClipByValue"):
+            self.skipTest("TensorFlow build does not expose raw ClipByValue")
+
+        rng = np.random.RandomState(2027)
         batch_size = 8
 
         left_np = rng.standard_normal((batch_size, _HALF_DIM)).astype(np.float32)
         right_np = rng.standard_normal((batch_size, _HALF_DIM)).astype(np.float32)
         scale_np = rng.uniform(-0.1, 0.1, size=(_FEATURE_DIM,)).astype(np.float32)
+
         expected = normalize_core_numpy(left_np, right_np, scale_np)
+        result, dump_text, graph_def, _ = self._run_case(
+            left_np,
+            right_np,
+            scale_np,
+            enable_kernel=True,
+            use_clip_op=True,
+            dump_graph=True,
+        )
 
-        fused_result, fused_dump, fused_graph, _ = self._run_case(
-            left_np, right_np, scale_np, enable_kernel=True, dump_graph=True
-        )
-        fallback_result, fallback_dump, fallback_graph, _ = self._run_case(
-            left_np, right_np, scale_np, enable_kernel=False, dump_graph=True
+        self.assertIn('op: "MusaLayerNorm"', dump_text)
+
+        fused_nodes = [node for node in graph_def.node if node.op == "MusaLayerNorm"]
+        self.assertEqual(len(fused_nodes), 1, "Expected exactly one fused LayerNorm node")
+        self.assertEqual(len(fused_nodes[0].input), 3)
+        self.assertAllClose(
+            fused_nodes[0].attr["epsilon"].f,
+            np.float32(_CLIP_LOWER * _CLIP_LOWER),
+            rtol=1e-5,
+            atol=1e-28,
         )
 
-        self.assertIn('op: "MusaLayerNorm"', fused_dump)
-        self.assertNotIn('op: "MusaLayerNorm"', fallback_dump)
-        self.assertTrue(
-            any(node.op == "MusaLayerNorm" for node in fused_graph.node),
-            "Expected fused graph to contain MusaLayerNorm",
-        )
+        residual_ops = {
+            node.op
+            for node in graph_def.node
+            if node.op
+            in (
+                "RealDiv",
+                "Div",
+                "Mean",
+                "Sqrt",
+                "Minimum",
+                "Maximum",
+                "ClipByValue",
+                "MusaClip",
+            )
+        }
         self.assertFalse(
-            any(node.op == "MusaLayerNorm" for node in fallback_graph.node),
-            "Expected fallback graph to keep the original normalize-core ops",
+            residual_ops,
+            f"Residual normalize-core ops remained in graph: {sorted(residual_ops)}",
         )
 
-        self.assertAllClose(fused_result, expected, rtol=1e-5, atol=1e-5)
-        self.assertAllClose(fallback_result, expected, rtol=1e-5, atol=1e-5)
-        self.assertAllClose(fused_result, fallback_result, rtol=1e-5, atol=1e-5)
+        self.assertAllClose(result, expected, rtol=1e-5, atol=1e-5)
 
     def test_layernorm_core_perf_compare(self):
         if os.environ.get(_RUN_PERF_TESTS_ENV) != "1":

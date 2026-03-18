@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -279,6 +280,73 @@ bool MatchBinaryWithConst(const GraphDef& graph, const NodeDef* node,
   return false;
 }
 
+bool IsClipOp(const NodeDef& node) {
+  return IsOp(node, "MusaClip") || IsOp(node, "ClipByValue") ||
+         IsOp(node, "MusaClipByValue") || IsOp(node, "Clip");
+}
+
+bool MatchClipNode(const GraphDef& graph, const NodeDef* clip_node,
+                   const NodeDef** unclipped_input) {
+  if (!clip_node || !IsClipOp(*clip_node) || clip_node->input_size() != 3) {
+    return false;
+  }
+
+  const NodeDef* lower_node = FindResolvedProducer(graph, clip_node->input(1));
+  const NodeDef* upper_node = FindResolvedProducer(graph, clip_node->input(2));
+  if (!HasFloatValue(lower_node, kScaleOnlyLowerClip, 1e-13f) ||
+      !HasFloatValue(upper_node, kScaleOnlyUpperClip, 1e-3f)) {
+    return false;
+  }
+
+  *unclipped_input = FindResolvedProducer(graph, clip_node->input(0));
+  return *unclipped_input != nullptr;
+}
+
+bool MatchClippedSqrt(const GraphDef& graph, const NodeDef* clipped_node,
+                      const NodeDef** sqrt_node,
+                      std::vector<const NodeDef*>* matched_clip_nodes) {
+  if (!clipped_node || !sqrt_node) {
+    return false;
+  }
+
+  const NodeDef* matched_sqrt = nullptr;
+  if (IsOp(*clipped_node, "Maximum")) {
+    const NodeDef* minimum_node = nullptr;
+    if (!MatchBinaryWithConst(graph, clipped_node, "Maximum",
+                              kScaleOnlyLowerClip, 1e-13f, &minimum_node)) {
+      return false;
+    }
+
+    if (!MatchBinaryWithConst(graph, minimum_node, "Minimum",
+                              kScaleOnlyUpperClip, 1e-3f, &matched_sqrt)) {
+      return false;
+    }
+
+    if (matched_clip_nodes) {
+      PushUnique(matched_clip_nodes, clipped_node);
+      PushUnique(matched_clip_nodes, minimum_node);
+    }
+  } else if (IsClipOp(*clipped_node)) {
+    if (!MatchClipNode(graph, clipped_node, &matched_sqrt)) {
+      return false;
+    }
+
+    if (matched_clip_nodes) {
+      PushUnique(matched_clip_nodes, clipped_node);
+    }
+  } else {
+    return false;
+  }
+
+  if (!matched_sqrt || !IsOp(*matched_sqrt, "Sqrt") ||
+      matched_sqrt->input_size() != 1) {
+    return false;
+  }
+
+  *sqrt_node = matched_sqrt;
+  return true;
+}
+
 bool MatchCenteredSubRoot(const GraphDef& graph, const NodeDef* sub_node,
                           const NodeDef** input_node,
                           const NodeDef** mean_expand_node) {
@@ -533,20 +601,25 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
   }
 
   const NodeDef* sub_a = nullptr;
-  const NodeDef* maximum_node = nullptr;
+  const NodeDef* sqrt_node = nullptr;
+  std::vector<const NodeDef*> matched_clip_nodes;
   for (int i = 0; i < 2; ++i) {
     const NodeDef* numerator = FindProducer(graph, realdiv_node->input(i));
     const NodeDef* denominator = FindProducer(graph, realdiv_node->input(1 - i));
     if (!numerator || !denominator) continue;
 
-    if (IsOp(*numerator, "Sub") && IsOp(*denominator, "Maximum")) {
+    const NodeDef* matched_sqrt = nullptr;
+    std::vector<const NodeDef*> clip_nodes;
+    if (IsOp(*numerator, "Sub") &&
+        MatchClippedSqrt(graph, denominator, &matched_sqrt, &clip_nodes)) {
       sub_a = numerator;
-      maximum_node = denominator;
+      sqrt_node = matched_sqrt;
+      matched_clip_nodes = std::move(clip_nodes);
       break;
     }
   }
 
-  if (!sub_a || !maximum_node) {
+  if (!sub_a || !sqrt_node || matched_clip_nodes.empty()) {
     return result;
   }
 
@@ -565,22 +638,6 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
   const NodeDef* mean_input = nullptr;
   if (!MatchMeanWithAxis(graph, mean_node, kReduceAxis, &mean_input) ||
       mean_input != concat_node || !IsOp(*concat_node, "ConcatV2")) {
-    return result;
-  }
-
-  const NodeDef* minimum_node = nullptr;
-  if (!MatchBinaryWithConst(graph, maximum_node, "Maximum",
-                            kScaleOnlyLowerClip, 1e-13f, &minimum_node)) {
-    return result;
-  }
-
-  const NodeDef* sqrt_node = nullptr;
-  if (!MatchBinaryWithConst(graph, minimum_node, "Minimum",
-                            kScaleOnlyUpperClip, 1e-3f, &sqrt_node)) {
-    return result;
-  }
-
-  if (!sqrt_node || !IsOp(*sqrt_node, "Sqrt") || sqrt_node->input_size() != 1) {
     return result;
   }
 
@@ -611,8 +668,9 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
   result.matched = true;
   PushUnique(&result.matched_nodes, &final_mul);
   PushUnique(&result.matched_nodes, realdiv_node);
-  PushUnique(&result.matched_nodes, maximum_node);
-  PushUnique(&result.matched_nodes, minimum_node);
+  for (const NodeDef* clip_node : matched_clip_nodes) {
+    PushUnique(&result.matched_nodes, clip_node);
+  }
   PushUnique(&result.matched_nodes, sqrt_node);
   PushUnique(&result.matched_nodes, var_expand_node);
   PushUnique(&result.matched_nodes, var_mean_node);
