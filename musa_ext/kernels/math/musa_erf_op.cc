@@ -1,8 +1,8 @@
+#include "../utils_op.h"
 #include "tensorflow/core/framework/bfloat16.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/types.h"
-#include "../utils_op.h"
 #include "utils/logging.h"
 
 namespace tensorflow {
@@ -26,12 +26,14 @@ struct ErfRunner {
     mUnary op;
     op.SetMode(::musa::dnn::Unary::Mode::ERF);
     auto status = op.Run(handle, t_output, t_input);
-    OP_REQUIRES(ctx, status == ::musa::dnn::Status::SUCCESS,
-                errors::Internal("MUSA muDNN Unary Erf execution failed. Status: ",
-                                 static_cast<int>(status)));
+    OP_REQUIRES(
+        ctx, status == ::musa::dnn::Status::SUCCESS,
+        errors::Internal("MUSA muDNN Unary Erf execution failed. Status: ",
+                         static_cast<int>(status)));
 
     musaStream_t stream = GetMusaStreamByCtx(ctx);
-    LaunchErfSpecialCaseFixup<T>(input.flat<T>().data(), output->flat<T>().data(),
+    LaunchErfSpecialCaseFixup<T>(input.flat<T>().data(),
+                                 output->flat<T>().data(),
                                  static_cast<int>(input.NumElements()), stream);
 
     auto kernel_status = musaGetLastError();
@@ -46,7 +48,8 @@ struct ErfRunner<double> {
   static void Run(OpKernelContext* ctx, const Tensor& input, Tensor* output,
                   mFormat /*format*/) {
     musaStream_t stream = GetMusaStreamByCtx(ctx);
-    LaunchErf<double>(input.flat<double>().data(), output->flat<double>().data(),
+    LaunchErf<double>(input.flat<double>().data(),
+                      output->flat<double>().data(),
                       static_cast<int>(input.NumElements()), stream);
 
     auto kernel_status = musaGetLastError();

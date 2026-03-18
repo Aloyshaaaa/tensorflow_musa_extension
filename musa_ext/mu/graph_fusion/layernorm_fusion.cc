@@ -16,8 +16,8 @@ limitations under the License.
 #include "mu/graph_fusion/layernorm_fusion.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
@@ -228,8 +228,7 @@ std::string FloatToString(float value) {
 }
 
 bool MatchExpandDimsWithDim(const GraphDef& graph, const NodeDef* expand_node,
-                            int64_t expected_dim,
-                            const NodeDef** data_input) {
+                            int64_t expected_dim, const NodeDef** data_input) {
   if (!expand_node || !IsOp(*expand_node, "ExpandDims") ||
       expand_node->input_size() != 2) {
     return false;
@@ -605,7 +604,8 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
   std::vector<const NodeDef*> matched_clip_nodes;
   for (int i = 0; i < 2; ++i) {
     const NodeDef* numerator = FindProducer(graph, realdiv_node->input(i));
-    const NodeDef* denominator = FindProducer(graph, realdiv_node->input(1 - i));
+    const NodeDef* denominator =
+        FindProducer(graph, realdiv_node->input(1 - i));
     if (!numerator || !denominator) continue;
 
     const NodeDef* matched_sqrt = nullptr;
@@ -654,7 +654,8 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
 
   const NodeDef* var_mul_node = nullptr;
   if (!MatchMeanWithAxis(graph, var_mean_node, kReduceAxis, &var_mul_node) ||
-      !var_mul_node || !IsMulOp(*var_mul_node) || var_mul_node->input_size() != 2) {
+      !var_mul_node || !IsMulOp(*var_mul_node) ||
+      var_mul_node->input_size() != 2) {
     return result;
   }
 
@@ -697,8 +698,8 @@ FusionMatchResult MusaLayerNormFusion::MatchFromMulNode(
   return result;
 }
 
-Status MusaLayerNormFusion::Apply(
-    GraphDef* graph, const FusionMatchResult& match_result) const {
+Status MusaLayerNormFusion::Apply(GraphDef* graph,
+                                  const FusionMatchResult& match_result) const {
   if (!match_result.IsValid()) {
     return Status(error::INVALID_ARGUMENT, "Invalid LayerNorm match result");
   }
@@ -757,7 +758,8 @@ Status MusaLayerNormFusion::Apply(
   auto input_name_it = match_result.captured_attrs.find("input_tensor");
   if (input_name_it != match_result.captured_attrs.end()) {
     fused_input_name = input_name_it->second;
-  } else if (input_it != match_result.captured_nodes.end() && input_it->second) {
+  } else if (input_it != match_result.captured_nodes.end() &&
+             input_it->second) {
     fused_input_name = input_it->second->name();
   } else {
     auto mean_it = match_result.captured_nodes.find("mean");
@@ -869,7 +871,8 @@ Status MusaLayerNormFusion::Apply(
 
   std::unordered_set<std::string> protected_node_names = {original_name};
   auto protect_input = [&protected_node_names](const std::string& input_name) {
-    const std::string producer = FusionGraphUtils::GetProducerNodeName(input_name);
+    const std::string producer =
+        FusionGraphUtils::GetProducerNodeName(input_name);
     if (!producer.empty()) {
       protected_node_names.insert(producer);
     }
