@@ -241,6 +241,22 @@ const NodeDef* UnpackSingleElementPack(const GraphDef& graph,
   return FindResolvedProducer(graph, resolved->input(0));
 }
 
+const NodeDef* UnwrapExpandDimsAxisZero(const GraphDef& graph,
+                                        const NodeDef* node) {
+  const NodeDef* resolved = ResolveIdentityLike(graph, node);
+  if (!resolved || !IsOp(*resolved, "ExpandDims") ||
+      resolved->input_size() != 2) {
+    return resolved;
+  }
+
+  const NodeDef* axis_node = FindResolvedProducer(graph, resolved->input(1));
+  if (!HasIntValue(axis_node, 0)) {
+    return resolved;
+  }
+
+  return FindResolvedProducer(graph, resolved->input(0));
+}
+
 bool AreEquivalentDimsNode(const GraphDef& graph, const NodeDef* a,
                            const NodeDef* b) {
   if (!a || !b) {
@@ -262,6 +278,14 @@ bool AreEquivalentDimsNode(const GraphDef& graph, const NodeDef* a,
   const NodeDef* unpacked_a = UnpackSingleElementPack(graph, resolved_a);
   const NodeDef* unpacked_b = UnpackSingleElementPack(graph, resolved_b);
   if (unpacked_a && unpacked_b && unpacked_a == unpacked_b) {
+    return true;
+  }
+
+  const NodeDef* normalized_a =
+      UnwrapExpandDimsAxisZero(graph, unpacked_a ? unpacked_a : resolved_a);
+  const NodeDef* normalized_b =
+      UnwrapExpandDimsAxisZero(graph, unpacked_b ? unpacked_b : resolved_b);
+  if (normalized_a && normalized_b && normalized_a == normalized_b) {
     return true;
   }
 
