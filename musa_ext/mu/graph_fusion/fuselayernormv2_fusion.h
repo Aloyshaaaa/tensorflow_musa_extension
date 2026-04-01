@@ -13,11 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_LAYERNORM_FUSION_H_
-#define TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_LAYERNORM_FUSION_H_
+#ifndef TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_FUSELAYERNORMV2_FUSION_H_
+#define TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_FUSELAYERNORMV2_FUSION_H_
 
 #include <string>
-#include <vector>
 
 #include "mu/graph_fusion/fusion_pattern_manager.h"
 
@@ -25,45 +24,34 @@ namespace tensorflow {
 namespace grappler {
 namespace musa_fusion {
 
-/**
- * LayerNorm Fusion Pattern
- *
- * Matches the pattern: AddV2(Mul(MusaNormalize, gamma), beta)
- *
- *   Layer 1 (start): MusaNormalize - Normalize input (already fused from
- * normalize pattern) Layer 2:         Mul           - Scale by gamma Layer 3
- * (end):   AddV2         - Add beta bias
- *
- * Inputs:
- *   - x: Original input tensor (from MusaNormalize's first input)
- *   - gamma: Scale parameter (Const or ExpandDims of Const)
- *   - beta: Bias parameter (Const or ExpandDims of Const)
- *   - epsilon: From MusaNormalize's epsilon attribute (default 1e-5)
- *
- * Output: LayerNorm(x, gamma, beta)
- *
- * Fused op: MusaLayerNorm
- */
-class MusaLayerNormFusion : public FusionPattern {
+// FuseLayerNormV2 fusion pattern.
+//
+// Matches the following pattern:
+//   x -> Shape -> Slice(d0,d1,d2)
+//   x -> Reshape([1, d0*d1, d2, 1])
+//     -> FusedBatchNormV3(scale=Fill([d0*d1],1), offset=Fill([d0*d1],0),
+//                         data_format=NCHW, is_training=true, epsilon=eps)
+//     -> Reshape(Shape(x))
+//     -> Mul(gamma[d2]) -> Add(beta[d2])
+//
+// Replaces it with:
+//   MusaLayerNorm(x, gamma, beta, epsilon=eps)
+class MusaFuseLayerNormV2Fusion : public FusionPattern {
  public:
-  MusaLayerNormFusion();
-  ~MusaLayerNormFusion() override = default;
+  MusaFuseLayerNormV2Fusion();
+  ~MusaFuseLayerNormV2Fusion() override = default;
 
-  // Match the LayerNorm pattern starting from AddV2 node (layer 11)
   FusionMatchResult Match(const GraphDef& graph,
                           int start_node_idx) const override;
 
-  // Apply the fusion: replace matched subgraph with MusaLayerNorm
   Status Apply(GraphDef* graph,
                const FusionMatchResult& match_result) const override;
 
-  // Priority: higher than basic patterns
-  int GetPriority() const override { return 1; }
+  int GetPriority() const override { return 110; }
 
-  // Kernel is available (implemented in musa_layernorm_op.cc)
   bool IsKernelAvailable() const override;
 
-  std::string GetName() const override { return "MusaLayerNormFusion"; }
+  std::string GetName() const override { return "MusaFuseLayerNormV2Fusion"; }
 
   std::string GetFallbackReason() const override {
     if (!kernel_available_) {
@@ -73,8 +61,6 @@ class MusaLayerNormFusion : public FusionPattern {
   }
 
  private:
-  // Match LayerNorm pattern starting from AddV2 node
-  // Pattern: AddV2(Mul(MusaNormalize, gamma), beta)
   FusionMatchResult MatchFromAddNode(const GraphDef& graph,
                                      int add_node_idx) const;
 
@@ -86,4 +72,4 @@ class MusaLayerNormFusion : public FusionPattern {
 }  // namespace grappler
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_LAYERNORM_FUSION_H_
+#endif  // TENSORFLOW_MUSA_EXTENSION_GRAPH_FUSION_FUSELAYERNORMV2_FUSION_H_
